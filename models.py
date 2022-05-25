@@ -28,11 +28,14 @@ class Classifier(nn.Module):
                 *[MLPBlock(hidden_dim, hidden_dim) for _ in range(n_layers - 2)],
                 nn.Linear(hidden_dim, out_dim)
             )
-        self.act_fn = getattr(nn, act_fn)(**kwargs)
+        self.act_fn = None
+        if act_fn != "None":
+            self.act_fn = getattr(nn, act_fn)(**kwargs)
     
     def forward(self, x):
         x = self.mlp(x)
-        x = self.act_fn(x)
+        if self.act_fn is not None:
+            x = self.act_fn(x)
         return x
 
 

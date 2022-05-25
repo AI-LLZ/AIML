@@ -33,7 +33,7 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     for idx, batch in enumerate(tqdm(data_loader)):
         logits = model(batch['wav'])
         labels = batch['label']
-        loss = criterion(logits, labels)
+        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
         loss = loss / args.accu_step
         accelerator.backward(loss)
@@ -77,7 +77,7 @@ def validate(data_loader, model, criterion):
     for idx, batch in enumerate(tqdm(data_loader)):
         logits = model(batch['wav'])
         labels = batch['label']
-        loss = criterion(logits, labels)
+        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
 
         all_labels.extend(labels.cpu().numpy())
@@ -102,7 +102,7 @@ def main(args):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.wd
     )
-    criterion = nn.CrossEntropyLoss(reduction='mean')
+    criterion = nn.BCELoss()
 
     starting_epoch = 1
     if args.wandb:
