@@ -3,6 +3,7 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
 import torch
+import numpy as np
 import wandb
 from accelerate import Accelerator
 from torch import nn
@@ -11,6 +12,8 @@ from tqdm import tqdm
 from transformers import (
     get_cosine_schedule_with_warmup,
 )
+
+from sklearn.metrics import roc_auc_score
 
 from dataset import CoswaraDataset
 from models import M5 
@@ -23,6 +26,7 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     train_accs = []
     log_loss = []
     log_accs = []
+    all_labels, all_logits = [], []
 
     model.train()
 
@@ -34,6 +38,11 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
         loss = loss / args.accu_step
         accelerator.backward(loss)
 
+        all_labels.extend(labels.cpu().numpy())
+        if not len(all_logits):
+            all_logits = logits.detach().cpu().numpy()
+        else:
+            all_logits = np.concatenate([all_logits, logits.detach().cpu().numpy()])
         train_loss.append(loss.item())
         train_accs.append(acc)
         log_loss.append(loss.item())
@@ -49,12 +58,13 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
             log_loss = sum(log_loss) / len(log_loss)
             log_acc = sum(log_accs) / len(log_accs)
             print(f"Train Loss: {log_loss:.4f}, Train Acc: {log_acc:.4f}")
-            log_loss, log_acc = [], []
-
+            log_loss, log_acc= [], []
+    
+    train_auc = roc_auc_score(np.eye(2)[all_labels], all_logits)
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
 
-    return train_loss, train_acc
+    return train_loss, train_acc, train_auc
 
 
 @torch.no_grad()
@@ -62,29 +72,37 @@ def validate(data_loader, model, criterion):
     model.eval()
     valid_loss = []
     valid_accs = []
+    all_labels, all_logits = [], []
 
     for idx, batch in enumerate(tqdm(data_loader)):
         logits = model(batch['wav'])
         labels = batch['label']
         loss = criterion(logits, labels)
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
+
+        all_labels.extend(labels.cpu().numpy())
+        if not len(all_logits):
+            all_logits = logits.detach().cpu().numpy()
+        else:
+            all_logits = np.concatenate([all_logits, logits.detach().cpu().numpy()])
         valid_loss.append(loss.item())
         valid_accs.append(acc)
+    valid_auc = roc_auc_score(np.eye(2)[all_labels], all_logits) 
     valid_loss = sum(valid_loss) / len(valid_loss)
     valid_acc = sum(valid_accs) / len(valid_accs)
 
-    return valid_loss, valid_acc
+    return valid_loss, valid_acc, valid_auc
 
 
 def main(args):
     same_seeds(args.seed)
     accelerator = Accelerator()
 
-    model = M5(1,7)
+    model = M5(1,2)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.wd
     )
-    criterion = nn.CrossEntropyLoss(reduction='sum')
+    criterion = nn.CrossEntropyLoss(reduction='mean')
 
     starting_epoch = 1
     if args.wandb:
@@ -98,7 +116,7 @@ def main(args):
 
     train_size = int(round(len(dataset) * 0.8))
     valid_size = len(dataset) - train_size
-    train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size])
+    train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
 
     print("Size of Training Set:", train_size * args.batch_size * N_SOUND)
     print("Size of Validation Set:", valid_size * args.batch_size * N_SOUND)
@@ -108,17 +126,20 @@ def main(args):
         collate_fn=train_set.dataset.collate_fn,
         shuffle=True,
         batch_size=args.batch_size,
+        pin_memory=True
     )
     valid_loader = DataLoader(
         valid_set,
         collate_fn=valid_set.dataset.collate_fn,
         shuffle=False,
         batch_size=args.batch_size,
+        pin_memory=True
     )
     warmup_step = int(0.1 * len(train_loader)) // args.accu_step
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, warmup_step, args.num_epoch * len(train_loader) - warmup_step
-    )
+    scheduler = None
+    # scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer, warmup_step, args.num_epoch * len(train_loader) - warmup_step
+    # )
 
     model, optimizer, train_loader, valid_loader = accelerator.prepare(
         model, optimizer, train_loader, valid_loader
@@ -127,12 +148,12 @@ def main(args):
 
     for epoch in range(starting_epoch, args.num_epoch + 1):
         print(f"Epoch {epoch}:")
-        train_loss, train_acc = train(
+        train_loss, train_acc, train_auc = train(
             accelerator, args, train_loader, model, optimizer, criterion, scheduler
         )
-        valid_loss, valid_acc = validate(valid_loader, model, criterion)
-        print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}")
-        print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}")
+        valid_loss, valid_acc, valid_auc = validate(valid_loader, model, criterion)
+        print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}, Train AUC: {train_auc:.2f}")
+        print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}, Valid AUC: {valid_auc:.2f}")
         if args.wandb:
             wandb.log(
                 {
@@ -192,7 +213,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=8)
 
     # training
-    parser.add_argument("--num_epoch", type=int, default=20)
+    parser.add_argument("--num_epoch", type=int, default=3)
     parser.add_argument("--accu_step", type=int, default=1)
     parser.add_argument("--prefix", type=str, default="")
     parser.add_argument("--wandb", action="store_true")

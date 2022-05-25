@@ -59,7 +59,7 @@ class M5(nn.Module):
         )
         
         self.cls = Classifier(
-            2 * n_channel, n_output, hidden_dim = 8, n_layers = 3, act_fn = 'LeakyReLU', **kwargs
+            2 * n_channel, n_output, hidden_dim = 8, n_layers = 3, act_fn = 'Sigmoid', **kwargs
         )
 
     def forward(self, x):

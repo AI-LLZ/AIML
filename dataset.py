@@ -21,7 +21,7 @@ class CoswaraDataset(Dataset):
         csv_path: str,
         audio_path: str,
         label_mapping: str,
-        max_len: int = 96000,
+        max_len: int = 160000,
         mode: str = "train"
     ):
         self.data = pd.read_csv(csv_path)
@@ -32,6 +32,7 @@ class CoswaraDataset(Dataset):
         self.max_len = max_len
         self.mode = mode
         self.padding = nn.ConstantPad1d(self.max_len, 0.0)
+        self.regression_mapping = [0, 0, 1, 1, 1, 0, 0]
 
     def __len__(self) -> int:
         return len(self.data)
@@ -69,7 +70,7 @@ class CoswaraDataset(Dataset):
                 # print('+'*20)
                 ret['wav'].append(wav)
                 ret['id'].append(_id)
-                ret['label'].append(_label)
+                ret['label'].append(self.regression_mapping[_label])
         ret['label'] = torch.tensor(ret['label']).long()
         ret['wav'] = torch.stack(ret['wav'])
         return ret
