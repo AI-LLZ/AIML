@@ -52,14 +52,13 @@ class CoswaraDataset(Dataset):
         return self._idx2label[idx]
 
     def collate_fn(self, samples: List[Dict]) -> Dict:
-        ret = defaultdict(list)        
+        ret = {'id': [], 'label': [], 'wav': []}
         for sample in samples:
             _id, _label = sample['id'], sample['label']
             root_path = os.path.join(self.audio_dir, _id, "*.wav")
             for wav_path in glob.glob(root_path):
-                ret['id'].append(_id)
-                ret['label'].append(_label)
                 wav, sr = torchaudio.load(wav_path)
+                if wav.shape[1] < 1600: continue
                 # print(wav_path)
                 if sr != 16000:
                     downsample = torchaudio.transforms.Resample(sr) # downsample to 16000 Hz
@@ -69,6 +68,8 @@ class CoswaraDataset(Dataset):
                 # print("after:", wav.shape)
                 # print('+'*20)
                 ret['wav'].append(wav)
+                ret['id'].append(_id)
+                ret['label'].append(_label)
         ret['label'] = torch.tensor(ret['label']).long()
         ret['wav'] = torch.stack(ret['wav'])
         return ret
@@ -76,16 +77,35 @@ class CoswaraDataset(Dataset):
 if __name__ == "__main__":
     print(str(torchaudio.get_audio_backend()))
     from torch.utils.data import DataLoader
-    dataset = CoswaraDataset(
-        csv_path = "/tmp2/b08902001/coswara/combined_data.csv",
-        audio_path = "/tmp2/b08902001/coswara",
-        label_mapping = "/tmp2/b08902001/coswara/mapping.json",
-    )
-    train_loader = DataLoader(dataset, batch_size=8,
-                            shuffle=False, collate_fn=dataset.collate_fn)
+    from accelerate import Accelerator
+    from tqdm import tqdm
 
-    for i, samples in enumerate(train_loader):
-        if i: break
-        print(samples['id'])
-        print(samples['label'].shape)
-        print(samples['wav'].shape)
+    accelerator = Accelerator()
+    dataset = CoswaraDataset(
+        csv_path = "./coswara/combined_data.csv",
+        audio_path = "./coswara",
+        label_mapping = "./coswara/mapping.json",
+    )
+    train_size = int(round(len(dataset) * 0.8))
+    valid_size = len(dataset) - train_size
+    train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size])
+
+    train_loader = DataLoader(
+        train_set,
+        collate_fn=train_set.dataset.collate_fn,
+        shuffle=True,
+        batch_size=2,
+    )
+    valid_loader = DataLoader(
+        valid_set,
+        collate_fn=valid_set.dataset.collate_fn,
+        shuffle=False,
+        batch_size=2
+        )
+
+    train_loader, valid_loader = accelerator.prepare(train_loader, valid_loader)
+    for idx, batch in enumerate(tqdm(train_loader)):
+        pass
+    for idx, batch in enumerate(tqdm(valid_loader)):
+        pass
+        

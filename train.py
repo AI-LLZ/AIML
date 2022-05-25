@@ -12,24 +12,32 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 
-from dataset import MultipleChoiceDataset
-from model import MultipleChoiceModel
+from dataset import CoswaraDataset
+from models import M5 
 from utils import same_seeds
 
+N_SOUND = 9
 
 def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler=None):
-    global log_time
     train_loss = []
     train_accs = []
+    log_loss = []
+    log_accs = []
 
     model.train()
 
     for idx, batch in enumerate(tqdm(data_loader)):
         logits = model(batch['wav'])
-        loss = criterion(logits, batch['label'])
+        labels = batch['label']
+        loss = criterion(logits, labels)
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
         loss = loss / args.accu_step
         accelerator.backward(loss)
+
+        train_loss.append(loss.item())
+        train_accs.append(acc)
+        log_loss.append(loss.item())
+        log_accs.append(acc)
 
         if ((idx + 1) % args.accu_step == 0) or (idx == len(data_loader) - 1):
             optimizer.step()
@@ -37,8 +45,11 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
                 scheduler.step()
             optimizer.zero_grad()
 
-        train_loss.append(loss.item())
-        train_accs.append(acc)
+        if ((idx + 1) % args.log_step == 0) or (idx == len(data_loader) - 1):
+            log_loss = sum(log_loss) / len(log_loss)
+            log_acc = sum(log_accs) / len(log_accs)
+            print(f"Train Loss: {log_loss:.4f}, Train Acc: {log_acc:.4f}")
+            log_loss, log_acc = [], []
 
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
@@ -54,7 +65,8 @@ def validate(data_loader, model, criterion):
 
     for idx, batch in enumerate(tqdm(data_loader)):
         logits = model(batch['wav'])
-        loss = criterion(logits, batch['label'])
+        labels = batch['label']
+        loss = criterion(logits, labels)
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
         valid_loss.append(loss.item())
         valid_accs.append(acc)
@@ -66,7 +78,7 @@ def validate(data_loader, model, criterion):
 
 def main(args):
     same_seeds(args.seed)
-    accelerator = Accelerator(fp16=True)
+    accelerator = Accelerator()
 
     model = M5(1,7)
     optimizer = torch.optim.AdamW(
@@ -88,19 +100,18 @@ def main(args):
     valid_size = len(dataset) - train_size
     train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size])
 
-    print("Size of Training Set:", train_size)
-    print("Size of Validation Set:", valid_size)
-
+    print("Size of Training Set:", train_size * args.batch_size * N_SOUND)
+    print("Size of Validation Set:", valid_size * args.batch_size * N_SOUND)
 
     train_loader = DataLoader(
         train_set,
-        collate_fn=train_set.collate_fn,
+        collate_fn=train_set.dataset.collate_fn,
         shuffle=True,
         batch_size=args.batch_size,
     )
     valid_loader = DataLoader(
         valid_set,
-        collate_fn=valid_set.collate_fn,
+        collate_fn=valid_set.dataset.collate_fn,
         shuffle=False,
         batch_size=args.batch_size,
     )
@@ -119,7 +130,7 @@ def main(args):
         train_loss, train_acc = train(
             accelerator, args, train_loader, model, optimizer, criterion, scheduler
         )
-        valid_loss, valid_acc = validate(valid_loader, model)
+        valid_loss, valid_acc = validate(valid_loader, model, criterion)
         print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}")
         print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}")
         if args.wandb:
@@ -160,7 +171,7 @@ def parse_args():
         "--data_dir",
         type=Path,
         help="Directory to the dataset.",
-        default="/tmp2/b08902001/coswara",
+        default="./coswara",
     )
     parser.add_argument("--model_name", type=str, default="hfl/chinese-macbert-base")
     parser.add_argument(
@@ -185,6 +196,7 @@ def parse_args():
     parser.add_argument("--accu_step", type=int, default=1)
     parser.add_argument("--prefix", type=str, default="")
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--log_step", type=int, default=10)
 
     args = parser.parse_args()
     return args
