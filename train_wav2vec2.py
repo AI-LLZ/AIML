@@ -15,6 +15,7 @@ from transformers import (
 import sys
 from sklearn.metrics import roc_auc_score
 
+from transformers import Wav2Vec2Config
 from dataset import CoswaraDataset
 from models import Wav2Vec2
 from utils import same_seeds
@@ -31,7 +32,8 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     model.train()
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        logits = model(batch['wav'].squeeze(1))
+        print(batch['wav'].shape)
+        logits = model(batch['wav'])
         labels = batch['label']
         loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
@@ -81,7 +83,7 @@ def validate(accelerator, data_loader, model, criterion):
     all_labels, all_logits = [], []
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        logits = model(batch['wav'].squeeze(1))
+        logits = model(batch['wav'])
         labels = batch['label']
         loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
@@ -131,6 +133,7 @@ def main(args):
         csv_path = os.path.join(args.data_dir, "combined_data.csv"),
         audio_path = args.data_dir,
         label_mapping = os.path.join(args.data_dir, "mapping.json"),
+        squeeze = True
     )
 
     train_size = int(round(len(dataset) * 0.8))

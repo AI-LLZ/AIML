@@ -23,6 +23,7 @@ class CoswaraDataset(Dataset):
         audio_path: str,
         label_mapping: str,
         max_len: int = 160000,
+        squeeze = False,
         mode: str = "train"
     ):
         df = pd.read_csv(csv_path)
@@ -34,6 +35,7 @@ class CoswaraDataset(Dataset):
         self.mode = mode
         self.padding = nn.ConstantPad1d(self.max_len, 0.0)
         self.regression_mapping = [0, 0, 1, 1, 1, 0, 0]
+        self.squeeze = squeeze
         # for i in range(len(self.regression_mapping)):
         #     n_samples = min(n_samples, len(self.data[self.data['covid_status'] == i]))
         n_samples = 100000
@@ -84,6 +86,8 @@ class CoswaraDataset(Dataset):
                 ret['label'].append(_label) # self.regression_mapping[_label])
         ret['label'] = torch.tensor(ret['label']).long()
         ret['wav'] = torch.stack(ret['wav'])
+        if self.squeeze:
+            ret['wav'] = ret['wav'].squeeze(1)
         return ret
 
 if __name__ == "__main__":
