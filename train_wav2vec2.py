@@ -1,244 +1,256 @@
-import logging
 import os
-import sys
-import warnings
-from dataclasses import dataclass, field
-from typing import Optional
+from argparse import ArgumentParser, Namespace
+from pathlib import Path
 
-import datasets
+import torch
 import numpy as np
-from datasets import DatasetDict, load_dataset
-
-import transformers
+import wandb
+from accelerate import Accelerator
+from torch import nn
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import (
-    AutoConfig,
-    AutoFeatureExtractor,
-    AutoModelForAudioClassification,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    set_seed,
+    get_cosine_schedule_with_warmup,
 )
+import sys
+from sklearn.metrics import roc_auc_score
 
-logger = logging.getLogger(__name__)
+from dataset import CoswaraDataset
+from models import Wav2Vec2
+from utils import same_seeds
 
-def main():
-    # See all possible arguments in src/transformers/training_args.py
-    # or by passing the --help flag to this script.
-    # We now keep distinct sets of args, for a cleaner separation of concerns.
+N_SOUND = 9
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler=None):
+    train_loss = []
+    train_accs = []
+    log_loss = []
+    log_accs = []
+    all_labels, all_logits = [], []
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+    model.train()
+
+    for idx, batch in enumerate(tqdm(data_loader)):
+        logits = model(batch['wav'].unsqueeze(1))
+        labels = batch['label']
+        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
+        acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
+        loss = loss / args.accu_step
+        accelerator.backward(loss)
+
+        all_labels.extend(labels.cpu().numpy())
+        if not len(all_logits):
+            all_logits = logits.detach().cpu().numpy()
+        else:
+            all_logits = np.concatenate([all_logits, logits.detach().cpu().numpy()])
+        train_loss.append(loss.item())
+        train_accs.append(acc)
+        log_loss.append(loss.item())
+        log_accs.append(acc)
+
+        if ((idx + 1) % args.accu_step == 0) or (idx == len(data_loader) - 1):
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad()
+
+        if ((idx + 1) % args.log_step == 0) or (idx == len(data_loader) - 1):
+            log_loss = sum(log_loss) / len(log_loss)
+            log_acc = sum(log_accs) / len(log_accs)
+            print(f"Train Loss: {log_loss:.4f}, Train Acc: {log_acc:.4f}")
+            log_loss, log_acc= [], []
+   
+    
+    train_loss = sum(train_loss) / len(train_loss)
+    train_acc = sum(train_accs) / len(train_accs)
+    try:
+        train_auc = roc_auc_score(np.eye(2)[all_labels], all_logits)
+    except Exception as e:
+        print(e)
+        print(all_labels, all_logits)
+        return train_loss, train_acc, 0
+
+    return train_loss, train_acc, train_auc
+
+
+@torch.no_grad()
+def validate(accelerator, data_loader, model, criterion):
+    model.eval()
+    valid_loss = []
+    valid_accs = []
+    all_labels, all_logits = [], []
+
+    for idx, batch in enumerate(tqdm(data_loader)):
+        logits = model(batch['wav'].unsqueeze(1))
+        labels = batch['label']
+        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
+        acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
+
+        all_labels.extend(labels.cpu().numpy())
+        if not len(all_logits):
+            all_logits = logits.detach().cpu().numpy()
+        else:
+            all_logits = np.concatenate([all_logits, logits.detach().cpu().numpy()])
+        valid_loss.append(loss.item())
+        valid_accs.append(acc)
+
+    all_labels = np.array(all_labels)
+    with open('logfile.log', 'w') as f:
+        print('all_labels', file=f)
+        print(all_labels, file=f)
+        print('all_logits', file=f)
+        print(all_logits, file=f)
+    valid_loss = sum(valid_loss) / len(valid_loss)
+    valid_acc = sum(valid_accs) / len(valid_accs)
+    try:
+        valid_auc = roc_auc_score(all_labels, all_logits[:,1]) 
+    except Exception as e:
+        print(e)
+        print(all_labels, all_logits)
+        return valid_loss, valid_acc, 0
+
+    return valid_loss, valid_acc, valid_auc
+
+
+def main(args):
+    same_seeds(args.seed)
+    accelerator = Accelerator()
+
+    config = Wav2Vec2Config(num_hidden_layers=6, num_attention_heads=6, num_labels=2)
+    model = Wav2Vec2(config)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.wd
+    )
+    criterion = nn.BCELoss()
+
+    starting_epoch = 1
+    if args.wandb:
+        wandb.watch(model)
+
+    dataset = CoswaraDataset(
+        csv_path = os.path.join(args.data_dir, "combined_data.csv"),
+        audio_path = args.data_dir,
+        label_mapping = os.path.join(args.data_dir, "mapping.json"),
     )
 
-    log_level = training_args.get_process_log_level()
-    logger.setLevel(log_level)
-    transformers.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.enable_default_handler()
-    transformers.utils.logging.enable_explicit_format()
+    train_size = int(round(len(dataset) * 0.8))
+    valid_size = len(dataset) - train_size
+    train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
 
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu} "
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    print("Size of Training Set:", train_size * args.batch_size * N_SOUND)
+    print("Size of Validation Set:", valid_size * args.batch_size * N_SOUND)
+
+    train_loader = DataLoader(
+        train_set,
+        collate_fn=train_set.dataset.collate_fn,
+        shuffle=True,
+        batch_size=args.batch_size,
+        pin_memory=True
     )
-    logger.info(f"Training/evaluation parameters {training_args}")
+    valid_loader = DataLoader(
+        valid_set,
+        collate_fn=valid_set.dataset.collate_fn,
+        shuffle=False,
+        batch_size=args.batch_size,
+        pin_memory=True
+    )
+    warmup_step = int(0.1 * len(train_loader)) // args.accu_step
+    scheduler = None
+    # scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer, warmup_step, args.num_epoch * len(train_loader) - warmup_step
+    # )
 
-    # Set seed before initializing model.
-    set_seed(training_args.seed)
+    model, optimizer, train_loader, valid_loader = accelerator.prepare(
+        model, optimizer, train_loader, valid_loader
+    )
+    best_loss = float("inf")
 
-    # Detecting last checkpoint.
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to train from scratch."
+    to_train, to_validate = True, True
+    for epoch in range(starting_epoch, args.num_epoch + 1):
+        print(f"Epoch {epoch}:")
+        if to_train:
+            train_loss, train_acc, train_auc = train(
+                accelerator, args, train_loader, model, optimizer, criterion, scheduler
             )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+            print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}, Train AUC: {train_auc:.2f}")
+        if to_validate:
+            valid_loss, valid_acc, valid_auc = validate(accelerator, valid_loader, model, criterion)
+            print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}, Valid AUC: {valid_auc:.2f}")
+        if args.wandb:
+            wandb.log(
+                {
+                    "Train Accuracy": train_acc,
+                    "Train Loss": train_loss,
+                    "Validation Accuracy": valid_acc,
+                    "Validation Loss": valid_loss,
+                }
             )
-
-    # Initialize our dataset and prepare it for the audio classification task.
-    raw_datasets = DatasetDict()
-    raw_datasets["train"] = load_dataset(
-        data_args.dataset_name,
-        data_args.dataset_config_name,
-        split=data_args.train_split_name,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-    raw_datasets["eval"] = load_dataset(
-        data_args.dataset_name,
-        data_args.dataset_config_name,
-        split=data_args.eval_split_name,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-
-    if data_args.audio_column_name not in raw_datasets["train"].column_names:
-        raise ValueError(
-            f"--audio_column_name {data_args.audio_column_name} not found in dataset '{data_args.dataset_name}'. "
-            "Make sure to set `--audio_column_name` to the correct audio column - one of "
-            f"{', '.join(raw_datasets['train'].column_names)}."
+        if valid_loss < best_loss:
+            best_loss = valid_loss
+            torch.save(
+                {
+                    "name": args.model_name,
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                },
+                os.path.join(args.ckpt_dir, f"{args.prefix}_best.ckpt"),
+            )
+        torch.save(
+            {
+                "name": args.model_name,
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            },
+            os.path.join(args.ckpt_dir, f"{args.prefix}_latest.ckpt"),
         )
 
-    if data_args.label_column_name not in raw_datasets["train"].column_names:
-        raise ValueError(
-            f"--label_column_name {data_args.label_column_name} not found in dataset '{data_args.dataset_name}'. "
-            "Make sure to set `--label_column_name` to the correct text column - one of "
-            f"{', '.join(raw_datasets['train'].column_names)}."
-        )
 
-    # Setting `return_attention_mask=True` is the way to get a correctly masked mean-pooling over
-    # transformer outputs in the classifier, but it doesn't always lead to better accuracy
-    feature_extractor = AutoFeatureExtractor.from_pretrained(
-        model_args.feature_extractor_name or model_args.model_name_or_path,
-        return_attention_mask=model_args.attention_mask,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+def parse_args():
+    parser = ArgumentParser()
+    parser.add_argument("--seed", type=int, default=5920)
+    parser.add_argument(
+        "--data_dir",
+        type=Path,
+        help="Directory to the dataset.",
+        default="./coswara",
+    )
+    parser.add_argument("--model_name", type=str, default="hfl/chinese-macbert-base")
+    parser.add_argument(
+        "--ckpt_dir",
+        type=Path,
+        help="Directory to save the model file.",
+        default="./ckpt/",
     )
 
-    # `datasets` takes care of automatically loading and resampling the audio,
-    # so we just need to set the correct target sampling rate.
-    raw_datasets = raw_datasets.cast_column(
-        data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-    )
+    # data
+    parser.add_argument("--max_len", type=int, default=96000)
 
-    def train_transforms(batch):
-        """Apply train_transforms across a batch."""
-        output_batch = {"input_values": []}
-        for audio in batch[data_args.audio_column_name]:
-            wav = random_subsample(
-                audio["array"], max_length=data_args.max_length_seconds, sample_rate=feature_extractor.sampling_rate
-            )
-            output_batch["input_values"].append(wav)
-        output_batch["labels"] = [label for label in batch[data_args.label_column_name]]
+    # optimizer
+    parser.add_argument("--lr", type=float, default=2e-2)
+    parser.add_argument("--wd", type=float, default=1e-4)
 
-        return output_batch
+    # data loader
+    parser.add_argument("--batch_size", type=int, default=8)
 
-    def val_transforms(batch):
-        """Apply val_transforms across a batch."""
-        output_batch = {"input_values": []}
-        for audio in batch[data_args.audio_column_name]:
-            wav = audio["array"]
-            output_batch["input_values"].append(wav)
-        output_batch["labels"] = [label for label in batch[data_args.label_column_name]]
+    # training
+    parser.add_argument("--num_epoch", type=int, default=3)
+    parser.add_argument("--accu_step", type=int, default=1)
+    parser.add_argument("--prefix", type=str, default="")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--log_step", type=int, default=10)
 
-        return output_batch
-
-    # Prepare label mappings.
-    # We'll include these in the model's config to get human readable labels in the Inference API.
-    labels = raw_datasets["train"].features[data_args.label_column_name].names
-    label2id, id2label = dict(), dict()
-    for i, label in enumerate(labels):
-        label2id[label] = str(i)
-        id2label[str(i)] = label
-
-    # Load the accuracy metric from the datasets package
-    metric = datasets.load_metric("accuracy")
-
-    # Define our compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with
-    # `predictions` and `label_ids` fields) and has to return a dictionary string to float.
-    def compute_metrics(eval_pred):
-        """Computes accuracy on a batch of predictions"""
-        predictions = np.argmax(eval_pred.predictions, axis=1)
-        return metric.compute(predictions=predictions, references=eval_pred.label_ids)
-
-    config = AutoConfig.from_pretrained(
-        model_args.config_name or model_args.model_name_or_path,
-        num_labels=len(labels),
-        label2id=label2id,
-        id2label=id2label,
-        finetuning_task="audio-classification",
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-    model = AutoModelForAudioClassification.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-        ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
-    )
-
-    # freeze the convolutional waveform encoder
-    if model_args.freeze_feature_encoder:
-        model.freeze_feature_encoder()
-
-    if training_args.do_train:
-        if data_args.max_train_samples is not None:
-            raw_datasets["train"] = (
-                raw_datasets["train"].shuffle(seed=training_args.seed).select(range(data_args.max_train_samples))
-            )
-        # Set the training transforms
-        raw_datasets["train"].set_transform(train_transforms, output_all_columns=False)
-
-    if training_args.do_eval:
-        if data_args.max_eval_samples is not None:
-            raw_datasets["eval"] = (
-                raw_datasets["eval"].shuffle(seed=training_args.seed).select(range(data_args.max_eval_samples))
-            )
-        # Set the validation transforms
-        raw_datasets["eval"].set_transform(val_transforms, output_all_columns=False)
-
-    # Initialize our trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=raw_datasets["train"] if training_args.do_train else None,
-        eval_dataset=raw_datasets["eval"] if training_args.do_eval else None,
-        compute_metrics=compute_metrics,
-        tokenizer=feature_extractor,
-    )
-
-    # Training
-    if training_args.do_train:
-        checkpoint = None
-        if training_args.resume_from_checkpoint is not None:
-            checkpoint = training_args.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()
-        trainer.log_metrics("train", train_result.metrics)
-        trainer.save_metrics("train", train_result.metrics)
-        trainer.save_state()
-
-    # Evaluation
-    if training_args.do_eval:
-        metrics = trainer.evaluate()
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
-
-    # Write model card and (optionally) push to hub
-    kwargs = {
-        "finetuned_from": model_args.model_name_or_path,
-        "tasks": "audio-classification",
-        "dataset": data_args.dataset_name,
-        "tags": ["audio-classification"],
-    }
-    if training_args.push_to_hub:
-        trainer.push_to_hub(**kwargs)
-    else:
-        trainer.create_model_card(**kwargs)
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(args)
+    if args.wandb:
+        wandb.login()
+        wandb.init(project="AI")
+        wandb.config.update(args)
+    main(args)

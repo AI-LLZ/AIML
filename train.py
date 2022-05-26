@@ -12,7 +12,7 @@ from tqdm import tqdm
 from transformers import (
     get_cosine_schedule_with_warmup,
 )
-
+import sys
 from sklearn.metrics import roc_auc_score
 
 from dataset import CoswaraDataset
@@ -20,6 +20,8 @@ from models import M5
 from utils import same_seeds
 
 N_SOUND = 9
+
+np.set_printoptions(threshold=sys.maxsize)
 
 def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler=None):
     train_loss = []
@@ -59,16 +61,22 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
             log_acc = sum(log_accs) / len(log_accs)
             print(f"Train Loss: {log_loss:.4f}, Train Acc: {log_acc:.4f}")
             log_loss, log_acc= [], []
+   
     
-    train_auc = roc_auc_score(np.eye(2)[all_labels], all_logits)
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
+    try:
+        train_auc = roc_auc_score(np.eye(2)[all_labels], all_logits)
+    except Exception as e:
+        print(e)
+        print(all_labels, all_logits)
+        return train_loss, train_acc, 0
 
     return train_loss, train_acc, train_auc
 
 
 @torch.no_grad()
-def validate(data_loader, model, criterion):
+def validate(accelerator, data_loader, model, criterion):
     model.eval()
     valid_loss = []
     valid_accs = []
@@ -87,9 +95,21 @@ def validate(data_loader, model, criterion):
             all_logits = np.concatenate([all_logits, logits.detach().cpu().numpy()])
         valid_loss.append(loss.item())
         valid_accs.append(acc)
-    valid_auc = roc_auc_score(np.eye(2)[all_labels], all_logits) 
+
+    all_labels = np.array(all_labels)
+    with open('logfile.log', 'w') as f:
+        print('all_labels', file=f)
+        print(all_labels, file=f)
+        print('all_logits', file=f)
+        print(all_logits, file=f)
     valid_loss = sum(valid_loss) / len(valid_loss)
     valid_acc = sum(valid_accs) / len(valid_accs)
+    try:
+        valid_auc = roc_auc_score(all_labels, all_logits[:,1]) 
+    except Exception as e:
+        print(e)
+        print(all_labels, all_logits)
+        return valid_loss, valid_acc, 0
 
     return valid_loss, valid_acc, valid_auc
 
@@ -146,14 +166,17 @@ def main(args):
     )
     best_loss = float("inf")
 
+    to_train, to_validate = True, True
     for epoch in range(starting_epoch, args.num_epoch + 1):
         print(f"Epoch {epoch}:")
-        train_loss, train_acc, train_auc = train(
-            accelerator, args, train_loader, model, optimizer, criterion, scheduler
-        )
-        valid_loss, valid_acc, valid_auc = validate(valid_loader, model, criterion)
-        print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}, Train AUC: {train_auc:.2f}")
-        print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}, Valid AUC: {valid_auc:.2f}")
+        if to_train:
+            train_loss, train_acc, train_auc = train(
+                accelerator, args, train_loader, model, optimizer, criterion, scheduler
+            )
+            print(f"Train Accuracy: {train_acc:.2f}, Train Loss: {train_loss:.2f}, Train AUC: {train_auc:.2f}")
+        if to_validate:
+            valid_loss, valid_acc, valid_auc = validate(accelerator, valid_loader, model, criterion)
+            print(f"Valid Accuracy: {valid_acc:.2f}, Valid Loss: {valid_loss:.2f}, Valid AUC: {valid_auc:.2f}")
         if args.wandb:
             wandb.log(
                 {

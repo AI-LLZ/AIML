@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2FeatureExtractor
 
 class MLPBlock(nn.Module):
     def __init__(self, input_dim, output_dim, p=0.5):
@@ -72,6 +73,22 @@ class M5(nn.Module):
         x = self.cls(x)
         return x
 
+class Wav2Vec2(nn.Module):
+    def __init__(self, config = None, pretrained = True, load_model = 'Wav2Vec2PreTrainedModel'):
+        super().__init__()
+        if config is None and not pretrained:
+            raise RuntimeError("Config is required if pretrain weight is not loaded.")
+       
+        if pretrained:
+            self.model = Wav2Vec2ForSequenceClassification.from_pretrained("superb/wav2vec2-base-superb-ks")
+        if config is not None:
+            self.model = Wav2Vec2ForSequenceClassification(config)
+        self.model.gradient_checkpointing_enable()
+
+    def forward(self, inputs):
+        return self.model(input_values = inputs)
+
+
 if __name__ == "__main__":
     x = torch.randn((72, 1, 96000))
     model = M5(1, 7)
@@ -83,4 +100,15 @@ if __name__ == "__main__":
 
 
     n = count_parameters(model)
-    print("Number of parameters: %s" % n)
+    print("Number of parameters of M5: %s" % n)
+    from transformers import Wav2Vec2Config
+    
+    x = x.unsqueeze()
+    config = Wav2Vec2Config(num_hidden_layers=6, num_attention_heads=6, num_labels=2)
+    model = Wav2Vec2(config)
+    
+    o = model(x)
+    print(o.shape)
+    n = count_parameters(model)
+    print("Number of parameters of Wav2Vec2: %s" % n)
+

@@ -7,6 +7,7 @@ from torch import nn
 from typing import List, Dict
 from torch.utils.data import Dataset
 from collections import defaultdict
+import numpy as np
 
 import re
 import torch
@@ -24,7 +25,7 @@ class CoswaraDataset(Dataset):
         max_len: int = 160000,
         mode: str = "train"
     ):
-        self.data = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path)
         self.audio_dir = audio_path
         with open(label_mapping) as f:
             self.label_mapping = eval(f.read())
@@ -33,6 +34,15 @@ class CoswaraDataset(Dataset):
         self.mode = mode
         self.padding = nn.ConstantPad1d(self.max_len, 0.0)
         self.regression_mapping = [0, 0, 1, 1, 1, 0, 0]
+        # for i in range(len(self.regression_mapping)):
+        #     n_samples = min(n_samples, len(self.data[self.data['covid_status'] == i]))
+        n_samples = 100000
+        df['covid_status'] = df['covid_status'].map(lambda x: self.regression_mapping[x])
+        df = df.groupby('covid_status').apply(lambda x: x.sample(612))
+        print(df)
+        self.data = df
+
+            
 
     def __len__(self) -> int:
         return len(self.data)
@@ -66,11 +76,12 @@ class CoswaraDataset(Dataset):
                     wav = downsample(wav)
                 # print("original:",wav.shape)
                 wav = random_subsample(wav, self.max_len)
+                wav = (wav - wav.mean()) / torch.sqrt(wav.var() + 1e-7)
                 # print("after:", wav.shape)
                 # print('+'*20)
                 ret['wav'].append(wav)
                 ret['id'].append(_id)
-                ret['label'].append(self.regression_mapping[_label])
+                ret['label'].append(_label) # self.regression_mapping[_label])
         ret['label'] = torch.tensor(ret['label']).long()
         ret['wav'] = torch.stack(ret['wav'])
         return ret
@@ -83,9 +94,9 @@ if __name__ == "__main__":
 
     accelerator = Accelerator()
     dataset = CoswaraDataset(
-        csv_path = "./coswara/combined_data.csv",
-        audio_path = "./coswara",
-        label_mapping = "./coswara/mapping.json",
+        csv_path = "./coswara_normalized/combined_data.csv",
+        audio_path = "./coswara_normalized",
+        label_mapping = "./coswara_normalized/mapping.json",
     )
     train_size = int(round(len(dataset) * 0.8))
     valid_size = len(dataset) - train_size
