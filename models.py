@@ -103,7 +103,8 @@ if __name__ == "__main__":
     print("Number of parameters of M5: %s" % n)
     from transformers import Wav2Vec2Config
     
-    x = x.unsqueeze()
+    x = x.squeeze(1)
+    print(x.shape)
     config = Wav2Vec2Config(num_hidden_layers=6, num_attention_heads=6, num_labels=2)
     model = Wav2Vec2(config)
     

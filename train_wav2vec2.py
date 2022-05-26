@@ -31,7 +31,7 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     model.train()
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        logits = model(batch['wav'].unsqueeze(1))
+        logits = model(batch['wav'].squeeze(1))
         labels = batch['label']
         loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
@@ -81,7 +81,7 @@ def validate(accelerator, data_loader, model, criterion):
     all_labels, all_logits = [], []
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        logits = model(batch['wav'].unsqueeze(1))
+        logits = model(batch['wav'].squeeze(1))
         labels = batch['label']
         loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
