@@ -85,8 +85,8 @@ class Wav2Vec2(nn.Module):
             self.model = Wav2Vec2ForSequenceClassification(config)
         self.model.gradient_checkpointing_enable()
 
-    def forward(self, inputs):
-        return self.model(input_values = inputs)
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
 
 
 if __name__ == "__main__":

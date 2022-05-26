@@ -32,10 +32,11 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     model.train()
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        print(batch['wav'].shape)
-        logits = model(batch['wav'])
+        output = model(input_values = batch['wav'], labels = batch['label'])
+        # loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
+        logits = output.logits
+        loss = output.loss
         labels = batch['label']
-        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
         loss = loss / args.accu_step
         accelerator.backward(loss)
@@ -83,9 +84,11 @@ def validate(accelerator, data_loader, model, criterion):
     all_labels, all_logits = [], []
 
     for idx, batch in enumerate(tqdm(data_loader)):
-        logits = model(batch['wav'])
+        output = model(input_values = batch['wav'], labels = batch['label'])
+        # loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
+        logits = output.logits
+        loss = output.loss
         labels = batch['label']
-        loss = criterion(logits, torch.eye(2)[labels].to(accelerator.device))
         acc = (logits.argmax(dim=-1) == labels).cpu().float().mean()
 
         all_labels.extend(labels.cpu().numpy())
@@ -120,6 +123,7 @@ def main(args):
 
     config = Wav2Vec2Config(num_hidden_layers=6, num_attention_heads=6, num_labels=2)
     model = Wav2Vec2(config)
+    
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.wd
     )
