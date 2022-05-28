@@ -72,9 +72,7 @@ class M5(nn.Module):
         )
 
     def forward(self, x):
-        print(x.shape, 'at input')
         x = self.feature_extractor(x)
-        print(x.shape)
         x = F.avg_pool1d(x, x.shape[-1])
         x = x.squeeze(-1)
         x = self.cls(x)
