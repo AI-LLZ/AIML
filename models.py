@@ -1,3 +1,4 @@
+from turtle import forward
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -5,7 +6,7 @@ import torch.nn.functional as F
 from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2FeatureExtractor
 
 class MLPBlock(nn.Module):
-    def __init__(self, input_dim, output_dim, p=0.5):
+    def __init__(self, input_dim, output_dim, p=0.1):
         super(MLPBlock, self).__init__()
 
         self.block = nn.Sequential(
@@ -39,50 +40,86 @@ class Classifier(nn.Module):
             x = self.act_fn(x)
         return x
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, kernel_size, stride=1, padding=0, p=0.3):
+        super(ConvBlock, self).__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv1d(in_dim, out_dim, kernel_size, stride, padding),
+            nn.BatchNorm1d(out_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(p),
+        )
+    def forward(self, inputs):
+        return self.block(inputs)
 
 class M5(nn.Module):
-    def __init__(self, n_input=1, n_output=35, stride=16, n_channel=32, hidden_dim = -1, n_layers = 1, act_fn = 'LeakyReLU', **kwargs):
+    def __init__(self, n_input=1, n_output=2, stride=4, n_channel=128, hidden_dim = -1, n_layers = 1, act_fn = 'LeakyReLU', **kwargs):
         super().__init__()
         self.feature_extractor = nn.Sequential(
-            nn.Conv1d(n_input, n_channel, 80, stride=stride),
-            nn.BatchNorm1d(n_channel),
-            nn.ReLU(),
+            ConvBlock(n_input, n_channel, 80, stride=stride),
             nn.MaxPool1d(4),
-            nn.Conv1d(n_channel, n_channel, 3),
-            nn.BatchNorm1d(n_channel),
-            nn.ReLU(),
+            ConvBlock(n_channel, n_channel, 3),
             nn.MaxPool1d(4),
-            nn.Conv1d(n_channel, 2 * n_channel, 3),
-            nn.BatchNorm1d(2 * n_channel),
-            nn.ReLU(),
+            ConvBlock(n_channel, 2 * n_channel, 3),
             nn.MaxPool1d(4),
-            nn.Conv1d(2 * n_channel, 2 * n_channel, 3),
-            nn.BatchNorm1d(2 * n_channel),
-            nn.ReLU(),
+            ConvBlock(2 * n_channel, 4 * n_channel, 3),
             nn.MaxPool1d(4),
         )
         
         self.cls = Classifier(
-            2 * n_channel, n_output, hidden_dim = 8, n_layers = 3, act_fn = 'Sigmoid', **kwargs
+            4 * n_channel, n_output, hidden_dim = hidden_dim, n_layers = n_layers, act_fn = act_fn, **kwargs
+        )
+
+    def forward(self, x):
+        print(x.shape, 'at input')
+        x = self.feature_extractor(x)
+        print(x.shape)
+        x = F.avg_pool1d(x, x.shape[-1])
+        x = x.squeeze(-1)
+        x = self.cls(x)
+        return x
+class M18(nn.Module):
+    def __init__(self, n_input=1, n_output=2, stride=4, n_channel=64, hidden_dim = -1, n_layers = 1, act_fn = 'LeakyReLU', **kwargs):
+        super().__init__()
+        self.feature_extractor = nn.Sequential(
+            ConvBlock(n_input, n_channel, 80, stride=stride),
+            nn.MaxPool1d(4),
+            *[ConvBlock(n_channel, n_channel, 3) for _ in range(4)],
+            nn.MaxPool1d(4),
+            ConvBlock(n_channel, 2 * n_channel, 3),
+            *[ConvBlock(2 * n_channel, 2 * n_channel, 3) for _ in range(3)],
+            nn.MaxPool1d(4),
+            ConvBlock(2 * n_channel, 4 * n_channel, 3),
+            *[ConvBlock(4 * n_channel, 4 * n_channel, 3) for _ in range(3)],
+            nn.MaxPool1d(4),
+            ConvBlock(4 * n_channel, 8 * n_channel, 3),
+            *[ConvBlock(8 * n_channel, 8 * n_channel, 3) for _ in range(3)],
+            nn.MaxPool1d(4),
+        )
+        
+        self.cls = Classifier(
+            8 * n_channel, n_output, hidden_dim = hidden_dim, n_layers = n_layers, act_fn = act_fn, **kwargs
         )
 
     def forward(self, x):
         x = self.feature_extractor(x)
+        print(x.shape)
         x = F.avg_pool1d(x, x.shape[-1])
         x = x.squeeze(-1)
         x = self.cls(x)
         return x
 
 class Wav2Vec2(nn.Module):
-    def __init__(self, config = None, pretrained = True, load_model = 'Wav2Vec2PreTrainedModel'):
+    def __init__(self, config = None, pretrained = True, load_model = 'superb/wav2vec2-base-superb-ks'):
         super().__init__()
         if config is None and not pretrained:
             raise RuntimeError("Config is required if pretrain weight is not loaded.")
        
-        if pretrained:
-            self.model = Wav2Vec2ForSequenceClassification.from_pretrained("superb/wav2vec2-base-superb-ks")
         if config is not None:
             self.model = Wav2Vec2ForSequenceClassification(config)
+        elif pretrained:
+            self.model = Wav2Vec2ForSequenceClassification.from_pretrained(load_model)
         self.model.gradient_checkpointing_enable()
 
     def forward(self, *args, **kwargs):
@@ -91,7 +128,7 @@ class Wav2Vec2(nn.Module):
 
 if __name__ == "__main__":
     x = torch.randn((72, 1, 96000))
-    model = M5(1, 7)
+    model = M5(1, 7, 4, 128)
     print(model)
     o = model(x)
     print(o.shape)
@@ -100,16 +137,13 @@ if __name__ == "__main__":
 
 
     n = count_parameters(model)
-    print("Number of parameters of M5: %s" % n)
-    from transformers import Wav2Vec2Config
+    print("Number of parameters of M5: %s" % round(n / 1e6, 1))
     
-    x = x.squeeze(1)
     print(x.shape)
-    config = Wav2Vec2Config(num_hidden_layers=6, num_attention_heads=6, num_labels=2)
-    model = Wav2Vec2(config)
+    model = M18(1,2)
     
     o = model(x)
     print(o.shape)
     n = count_parameters(model)
-    print("Number of parameters of Wav2Vec2: %s" % n)
+    print("Number of parameters of M18: %s" % round(n / 1e6, 1))
 

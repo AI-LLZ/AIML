@@ -1,3 +1,4 @@
+from random import random
 import torch
 import torchaudio
 import os
@@ -36,15 +37,14 @@ class CoswaraDataset(Dataset):
         self.padding = nn.ConstantPad1d(self.max_len, 0.0)
         self.regression_mapping = [0, 0, 1, 1, 1, 0, 0]
         self.squeeze = squeeze
-        # for i in range(len(self.regression_mapping)):
-        #     n_samples = min(n_samples, len(self.data[self.data['covid_status'] == i]))
         n_samples = 100000
         df['covid_status'] = df['covid_status'].map(lambda x: self.regression_mapping[x])
-        df = df.groupby('covid_status').apply(lambda x: x.sample(612))
-        print(df)
+        n_labels = len(set(df['covid_status']))
+        for i in range(n_labels):
+            n_samples = min(n_samples, len(df[df['covid_status'] == i]))
+        print(f"{n_samples=}, {n_labels=}")
+        df = df.groupby('covid_status').apply(lambda x: x.sample(n_samples, random_state=42))
         self.data = df
-
-            
 
     def __len__(self) -> int:
         return len(self.data)
