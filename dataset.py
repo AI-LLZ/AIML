@@ -25,7 +25,8 @@ class CoswaraDataset(Dataset):
         label_mapping: str,
         max_len: int = 160000,
         squeeze = False,
-        mode: str = "train"
+        mode: str = "train",
+        return_type = "pt"
     ):
         df = pd.read_csv(csv_path)
         self.audio_dir = audio_path
@@ -45,6 +46,8 @@ class CoswaraDataset(Dataset):
         print(f"{n_samples=}, {n_labels=}")
         df = df.groupby('covid_status').apply(lambda x: x.sample(n_samples, random_state=42))
         self.data = df
+        self.return_type = return_type
+        print(self.data)
 
     def __len__(self) -> int:
         return len(self.data)
@@ -68,7 +71,7 @@ class CoswaraDataset(Dataset):
         ret = {'id': [], 'label': [], 'wav': []}
         for sample in samples:
             _id, _label = sample['id'], sample['label']
-            root_path = os.path.join(self.audio_dir, _id, "*.wav")
+            root_path = os.path.join(self.audio_dir, _id, "cough-*.wav")
             for wav_path in glob.glob(root_path):
                 wav, sr = torchaudio.load(wav_path)
                 if wav.shape[1] < 1600: continue
@@ -88,6 +91,8 @@ class CoswaraDataset(Dataset):
         ret['wav'] = torch.stack(ret['wav'])
         if self.squeeze:
             ret['wav'] = ret['wav'].squeeze(1)
+        if self.return_type == "np":
+            ret['wav'] = ret['wav'].numpy()
         return ret
 
 if __name__ == "__main__":
@@ -95,6 +100,19 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     from accelerate import Accelerator
     from tqdm import tqdm
+
+    lens = []
+    df = pd.read_csv('./coswara/combined_data.csv')
+    for _id in df.id:
+        for file in glob.glob(f'./coswara/{_id}/cough-*.wav'):
+            wav, sr = torchaudio.load(file)
+            if sr != 16000:
+                print(file)
+            lens.append(wav.shape[1])
+    lens = np.array(lens)
+    print(lens.max(), lens.min(), lens.mean())
+
+    exit()
 
     accelerator = Accelerator()
     dataset = CoswaraDataset(

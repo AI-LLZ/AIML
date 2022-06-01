@@ -16,7 +16,7 @@ import sys
 from sklearn.metrics import roc_auc_score
 
 from dataset import CoswaraDataset
-from models import M5 
+from models import M5, M18 
 from utils import same_seeds
 
 N_SOUND = 9
@@ -66,11 +66,18 @@ def train(accelerator, args, data_loader, model, optimizer, criterion, scheduler
     
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
+    all_labels = np.array(all_labels)
+    pred = all_logits.argmax(axis=-1)
     try:
         train_auc = roc_auc_score(np.eye(2)[all_labels], all_logits)
+        sensitivity = np.sum((pred == all_labels) & (all_labels == 1)) / np.sum(all_labels == 1)
+        specificity = np.sum((pred == all_labels) & (all_labels == 0)) / np.sum(all_labels == 0)
+        print(f"Sensitivity: {sensitivity:.4f}, Specificity: {specificity:.4f}")
     except Exception as e:
         print(e)
-        print(all_labels, all_logits)
+
+        print(np.sum(all_labels), np.sum(logits.argmax(axis=-1)))
+        print(np.sum(1 - all_labels), np.sum(1 - logits.argmax(axis=-1)))
         return train_loss, train_acc, 0
 
     return train_loss, train_acc, train_auc
@@ -106,8 +113,12 @@ def validate(accelerator, data_loader, model, criterion):
         print(all_logits, file=f)
     valid_loss = sum(valid_loss) / len(valid_loss)
     valid_acc = sum(valid_accs) / len(valid_accs)
+    pred = all_logits.argmax(axis=-1)
     try:
-        valid_auc = roc_auc_score(all_labels, all_logits[:,1]) 
+        valid_auc = roc_auc_score(all_labels, all_logits[:,1])
+        sensitivity = np.sum((pred == all_labels) & (all_labels == 1)) / np.sum(all_labels == 1)
+        specificity = np.sum((pred == all_labels) & (all_labels == 0)) / np.sum(all_labels == 0)
+        print(f"Sensitivity: {sensitivity:.4f}, Specificity: {specificity:.4f}")
     except Exception as e:
         print(e)
         print(all_labels, all_logits)
@@ -120,7 +131,7 @@ def main(args):
     same_seeds(args.seed)
     accelerator = Accelerator()
 
-    model = M5(1,2)
+    model = M5(1,2, act_fn="Softmax", dim=1)
     print(model)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.wd
@@ -135,11 +146,14 @@ def main(args):
         csv_path = os.path.join(args.data_dir, "combined_data.csv"),
         audio_path = args.data_dir,
         label_mapping = os.path.join(args.data_dir, "mapping.json"),
+        max_len = args.max_len
     )
 
     train_size = int(round(len(dataset) * 0.8))
     valid_size = len(dataset) - train_size
     train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, valid_size], generator=torch.Generator().manual_seed(42))
+
+    print(valid_set.dataset.data)
 
     print("Size of Training Set:", train_size * args.batch_size * N_SOUND)
     print("Size of Validation Set:", valid_size * args.batch_size * N_SOUND)
