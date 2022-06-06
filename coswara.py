@@ -22,8 +22,8 @@ drive.mount('/content/drive')
 
 #!bash run.sh
 
-# !cp /content/drive/MyDrive/ai/coswara.zip ./coswara.zip
-# !unzip /content/coswara.zip
+!cp /content/drive/MyDrive/ai/coswara.zip ./coswara.zip
+!unzip /content/coswara.zip
 
 # !wget http://cml12.csie.ntu.edu.tw:1212/coswara.zip
 
@@ -205,7 +205,7 @@ class CoswaraDataset(Dataset):
 
 
                 wav = random_subsample(wav, self.max_len)
-                #wav = (wav - all_mean) / all_std
+                wav = (wav - all_mean) / all_std
                 #wav = wav.squeeze()
                 #print(wav)
                 sgram = spectro_gram(wav, n_mels=64, n_fft=1024, hop_len=None)
@@ -695,7 +695,9 @@ def main(args):
     model, optimizer, train_loader, valid_loader = accelerator.prepare(
         model, optimizer, train_loader, valid_loader
     )
-    best_loss = float("inf")
+    best_per = float("inf")
+    best_acc = float("inf")
+    best_auc = float("inf")
 
     to_train, to_validate = True, True
     for epoch in range(starting_epoch, args.num_epoch + 1):
@@ -709,8 +711,8 @@ def main(args):
             valid_loss, valid_acc, valid_auc = validate(accelerator, valid_loader, model, criterion)
             print(f"Valid Loss: {valid_loss:.2f}, Valid Accuracy: {valid_acc:.2f}, Valid AUC: {valid_auc:.2f}")
 
-        if valid_loss < best_loss:
-            best_loss = valid_loss
+        if valid_acc+valid_auc < best_per:
+            best_per = valid_acc+valid_auc
             torch.save(
                 {
                     "epoch": epoch,
@@ -719,6 +721,27 @@ def main(args):
                 },
                 os.path.join(args.ckpt_dir, f"{args.prefix}_best.ckpt"),
             )
+        if valid_acc < best_acc:
+            best_acc = valid_acc
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                },
+                os.path.join(args.ckpt_dir, f"{args.prefix}_best_acc.ckpt"),
+            )
+        if valid_auc < best_auc:
+            best_auc = valid_auc
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                },
+                os.path.join(args.ckpt_dir, f"{args.prefix}_best_auc.ckpt"),
+            )
+        
         torch.save(
             {
                 "epoch": epoch,
@@ -750,11 +773,11 @@ def parse_args():
     parser.add_argument("--max_len", type=int, default=96000)
 
     # optimizer
-    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
 
     # data loader
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=64)
 
     # training
     parser.add_argument("--num_epoch", type=int, default=60)
