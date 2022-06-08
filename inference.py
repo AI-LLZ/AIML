@@ -1,9 +1,11 @@
 import os
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from regex import W
 
 import torch
 import numpy as np
+from transformers import get_constant_schedule
 import torchaudio
 from accelerate import Accelerator
 from torch import logit, nn
@@ -17,6 +19,10 @@ from utils import random_subsample, same_seeds
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from torch.utils.data import DataLoader
 from xgboost import XGBClassifier
+import timm 
+from lightgbm import LGBMClassifier
+import torch.nn.functional as F
+
 
 
 N_SOUND = 9
@@ -47,46 +53,42 @@ def main(args):
     same_seeds(args.seed)
     accelerator = Accelerator()
 
-    model = M5(1,2, act_fn="Sigmoid") # change if you want to use different model
-    state_dict = torch.load(args.model_path) # load the trained model
-    model.load_state_dict(state_dict['model'])
+    cough_model = timm.create_model('resnet34d', num_classes=2, pretrained=True, in_chans=1)
+    breathe_model = timm.create_model('resnet34d', num_classes=2, pretrained=True, in_chans=1) 
+    status_model = LGBMClassifier(n_estimators=32, learning_rate=0.01, num_leaves=32, max_depth=4)
 
-    dataset = CoswaraDataset(
-        csv_path = os.path.join(args.data_dir, "combined_data.csv"),
-        audio_path = args.data_dir,
-        label_mapping = os.path.join(args.data_dir, "mapping.json"),
-        max_len = args.max_len
-    )
-    data_loader = DataLoader(dataset, batch_size=8, shuffle=False, collate_fn=dataset.collate_fn)
 
-    model, data_loader = accelerator.prepare(model, data_loader) 
+    cough_stat_dict = torch.load(os.path.join(args.ckpt_dir, 'ckpt-cough/_best.ckpt'))
+    breathe_state_dict = torch.load(os.path.join(args.ckpt_dir, 'ckpt-breathing/_best.ckpt'))
 
-    embeddings, labels = validate(data_loader, model)
+    cough_model.load_state_dict(cough_stat_dict['model'])
+    breathe_model.load_state_dict(breathe_state_dict['model'])
+    with open(f'lgbm.pkl', 'rb') as f:
+        status_model = pickle.load(f)
+
+    cough_model, breathe_model = accelerator.prepare(cough_model, breathe_model)
+
+    cough_model.eval()
+    breathe_model.eval()
+
+    cough = get_cough()
+    breathe = get_breathe()
+    status = get_status()
+
+    cough_logits = cough_model(cough)
+    cough_pred = F.softmax(torch.argmax(cough_logits, dim=1), dim=1)
+    breathe_logits = breathe_model(breathe)
+    breathe_pred = F.softmax(torch.argmax(breathe_logits, dim=1), dim=1)
+    status_pred = status_model.predict_proba(status)
+    def customEye(N : int, diagVal : float, otherVal : float):
+        a = np.full((N, N), otherVal)
+        a[np.diag_indices(N)] = diagVal
+        return a
     
-    # clf = LogisticRegression(solver='liblinear', random_state=1126, max_iter=100).fit(embeddings, labels)
-    print(labels)
-    clf = XGBClassifier(objective="binary:logistic", random_state=1126)
-    clf.fit(embeddings, labels)
-    print("* Train result:", clf.score(embeddings, labels), "auc", roc_auc_score(np.eye(3)[labels], clf.predict_proba(embeddings)))
-    gt = args.gt
 
-    wav, sr = torchaudio.load(args.wav_path, normalize = True)
-    if sr != 16000:
-        wav = torchaudio.transforms.Resample(sr, 16000)(wav)
-    wav = random_subsample(wav, args.max_len)
+    ensemble_test_pred = (breathe_pred @ customEye(2, 0.45, 0.)) + (cough_pred @ customEye(2, 0.45, 0.)) + (status_pred @ customEye(2, 0.1, 0.))
 
-    wav = wav.unsqueeze(0) # so that it has the shape (batch_size, ...)
-    wav = wav.to(accelerator.device)
-    with torch.no_grad():
-        embeddings = model.get_embedding(wav).detach().cpu().numpy()
-
-    print(clf.predict(embeddings))
-
-    # acc = (logits.argmax(dim=-1) == 0).cpu().float().mean()
-    # auc = acc # roc_auc_score(np.array([gt]), logits.detach().cpu().numpy()[:,1])
-
-    # print("Accuracy:", acc, "AUC:", auc)
-    
+    print(np.argmax(ensemble_test_pred, axis=-1))
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--seed", type=int, default=5920)
